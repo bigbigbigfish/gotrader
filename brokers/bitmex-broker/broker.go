@@ -12,6 +12,10 @@ type BitMEXBroker struct {
 	client *bitmex.BitMEX
 }
 
+func (b *BitMEXBroker) Subscribe(event string, param string, listener interface{}) {
+
+}
+
 func (b *BitMEXBroker) GetAccountSummary(currency string) (result AccountSummary, err error) {
 	var margin swagger.Margin
 	margin, err = b.client.GetMargin()
@@ -47,7 +51,7 @@ func (b *BitMEXBroker) GetOrderBook(symbol string, depth int) (result OrderBook,
 }
 
 func (b *BitMEXBroker) PlaceOrder(symbol string, direction Direction, orderType OrderType, price float64,
-	amount float64, postOnly bool, reduceOnly bool) (result Order, err error) {
+	stopPx float64, size float64, postOnly bool, reduceOnly bool) (result Order, err error) {
 	var side string
 	var _orderType string
 	if direction == Buy {
@@ -59,6 +63,10 @@ func (b *BitMEXBroker) PlaceOrder(symbol string, direction Direction, orderType 
 		_orderType = bitmex.ORD_TYPE_LIMIT
 	} else if orderType == OrderTypeMarket {
 		_orderType = bitmex.ORD_TYPE_MARKET
+	} else if orderType == OrderTypeStopLimit {
+		_orderType = bitmex.ORD_TYPE_STOP_LIMIT
+	} else if orderType == OrderTypeStopMarket {
+		_orderType = bitmex.ORD_TYPE_STOP
 	}
 	var execInst string
 	if postOnly {
@@ -71,7 +79,7 @@ func (b *BitMEXBroker) PlaceOrder(symbol string, direction Direction, orderType 
 		execInst += "ReduceOnly"
 	}
 	var order swagger.Order
-	order, err = b.client.PlaceOrder(side, _orderType, 0, price, int32(amount), "", execInst, symbol)
+	order, err = b.client.PlaceOrder(side, _orderType, stopPx, price, int32(size), "", execInst, symbol)
 	if err != nil {
 		return
 	}
@@ -116,6 +124,16 @@ func (b *BitMEXBroker) CancelAllOrders(symbol string) (err error) {
 	return
 }
 
+func (b *BitMEXBroker) AmendOrder(symbol string, id string, price float64, size float64) (result Order, err error) {
+	var resp swagger.Order
+	resp, err = b.client.AmendOrder2(id, "", "", 0, float32(size), 0, 0, price, 0, 0, "")
+	if err != nil {
+		return
+	}
+	result = b.convertOrder(&resp)
+	return
+}
+
 func (b *BitMEXBroker) GetPosition(symbol string) (result Position, err error) {
 	var ret swagger.Position
 	ret, err = b.client.GetPosition(symbol)
@@ -132,7 +150,7 @@ func (b *BitMEXBroker) convertOrder(order *swagger.Order) (result Order) {
 	result.ID = order.OrderID
 	result.Symbol = order.Symbol
 	result.Price = order.Price
-	result.Amount = float64(order.OrderQty)
+	result.Size = float64(order.OrderQty)
 	result.Direction = b.convertDirection(order.Side)
 	result.Type = b.convertOrderType(order.OrdType)
 	result.AvgPrice = order.AvgPx

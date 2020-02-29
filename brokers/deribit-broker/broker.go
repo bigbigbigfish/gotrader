@@ -1,6 +1,7 @@
 package deribit_broker
 
 import (
+	"github.com/chuckpreslar/emission"
 	. "github.com/coinrust/gotrader/models"
 	"github.com/frankrap/deribit-api"
 	"github.com/frankrap/deribit-api/models"
@@ -9,7 +10,45 @@ import (
 
 // DiribitBroker the deribit broker
 type DiribitBroker struct {
-	client *deribit.Client
+	client           *deribit.Client
+	orderBookManager *OrderBookManager
+	emitter          *emission.Emitter
+}
+
+func (b *DiribitBroker) Subscribe(event string, param string, listener interface{}) {
+	//b.client.Subscribe([]string{
+	//	"announcements",
+	//	"book.BTC-PERPETUAL.100.1.100ms",
+	//	"book.BTC-PERPETUAL.100ms",
+	//	"deribit_price_index.btc_usd",
+	//	"deribit_price_ranking.btc_usd",
+	//	"estimated_expiration_price.btc_usd",
+	//	"markprice.options.btc_usd",
+	//	"perpetual.BTC-PERPETUAL.raw",
+	//	"quote.BTC-PERPETUAL",
+	//	"ticker.BTC-PERPETUAL.raw",
+	//	"user.changes.BTC-PERPETUAL.raw",
+	//	"user.changes.future.BTC.raw",
+	//	"user.orders.BTC-PERPETUAL.raw",
+	//	"user.orders.future.BTC.100ms",
+	//	"user.portfolio.btc",
+	//	"user.trades.BTC-PERPETUAL.raw",
+	//	"user.trades.future.BTC.100ms",
+	//})
+	if event == "orderbook" {
+		b.emitter.On(event, listener)
+		b.client.On(param, b.handleOrderBook)
+		b.client.Subscribe([]string{param})
+	}
+}
+
+func (b *DiribitBroker) handleOrderBook(m *models.OrderBookNotification) {
+	b.orderBookManager.Update(m)
+	ob, ok := b.orderBookManager.GetOrderBook(m.InstrumentName)
+	if !ok {
+		return
+	}
+	b.emitter.Emit("orderbook", &ob)
 }
 
 func (b *DiribitBroker) GetAccountSummary(currency string) (result AccountSummary, err error) {
@@ -55,18 +94,24 @@ func (b *DiribitBroker) GetOrderBook(symbol string, depth int) (result OrderBook
 }
 
 func (b *DiribitBroker) PlaceOrder(symbol string, direction Direction, orderType OrderType, price float64,
-	amount float64, postOnly bool, reduceOnly bool) (result Order, err error) {
+	stopPx float64, size float64, postOnly bool, reduceOnly bool) (result Order, err error) {
 	var _orderType string
 	if orderType == OrderTypeLimit {
 		_orderType = models.OrderTypeLimit
+		stopPx = 0
 	} else if orderType == OrderTypeMarket {
 		_orderType = models.OrderTypeMarket
+		stopPx = 0
+	} else if orderType == OrderTypeStopLimit {
+		_orderType = models.OrderTypeStopLimit
+	} else if orderType == OrderTypeStopMarket {
+		_orderType = models.OrderTypeStopMarket
 	}
 	if direction == Buy {
 		var ret models.BuyResponse
 		ret, err = b.client.Buy(&models.BuyParams{
 			InstrumentName: symbol,
-			Amount:         amount,
+			Amount:         size,
 			Type:           _orderType,
 			//Label:          "",
 			Price: price,
@@ -74,7 +119,7 @@ func (b *DiribitBroker) PlaceOrder(symbol string, direction Direction, orderType
 			//MaxShow:        nil,
 			PostOnly:   postOnly,
 			ReduceOnly: reduceOnly,
-			//StopPrice:      0,
+			StopPrice:  stopPx,
 			//Trigger:        "",
 			//Advanced:       "",
 		})
@@ -86,7 +131,7 @@ func (b *DiribitBroker) PlaceOrder(symbol string, direction Direction, orderType
 		var ret models.SellResponse
 		ret, err = b.client.Sell(&models.SellParams{
 			InstrumentName: symbol,
-			Amount:         amount,
+			Amount:         size,
 			Type:           _orderType,
 			//Label:          "",
 			Price: price,
@@ -94,7 +139,7 @@ func (b *DiribitBroker) PlaceOrder(symbol string, direction Direction, orderType
 			//MaxShow:        nil,
 			PostOnly:   postOnly,
 			ReduceOnly: reduceOnly,
-			//StopPrice:      0,
+			StopPrice:  stopPx,
 			//Trigger:        "",
 			//Advanced:       "",
 		})
@@ -150,6 +195,30 @@ func (b *DiribitBroker) CancelAllOrders(symbol string) (err error) {
 	return
 }
 
+func (b *DiribitBroker) AmendOrder(symbol string, id string, price float64, size float64) (result Order, err error) {
+	params := &models.EditParams{
+		OrderID:   "",
+		Amount:    0,
+		Price:     0,
+		PostOnly:  false,
+		Advanced:  "",
+		StopPrice: 0,
+	}
+	if price > 0 {
+		params.Price = price
+	}
+	if size > 0 {
+		params.Amount = size
+	}
+	var resp models.EditResponse
+	resp, err = b.client.Edit(params)
+	if err != nil {
+		return
+	}
+	result = b.convertOrder(&resp.Order)
+	return
+}
+
 func (b *DiribitBroker) GetPosition(symbol string) (result Position, err error) {
 	var ret models.Position
 	ret, err = b.client.GetPosition(&models.GetPositionParams{InstrumentName: symbol})
@@ -166,7 +235,7 @@ func (b *DiribitBroker) convertOrder(order *models.Order) (result Order) {
 	result.ID = order.OrderID
 	result.Symbol = order.InstrumentName
 	result.Price = order.Price.ToFloat64()
-	result.Amount = order.Amount
+	result.Size = order.Amount
 	result.Direction = b.convertDirection(order.Direction)
 	result.Type = b.convertOrderType(order.OrderType)
 	result.AvgPrice = order.AveragePrice
@@ -218,7 +287,7 @@ func (b *DiribitBroker) orderStatus(order *models.Order) OrderStatus {
 	case models.OrderStateCancelled:
 		return OrderStatusCancelled
 	case models.OrderStateUntriggered:
-		return OrderStatusCreated
+		return OrderStatusUntriggered
 	default:
 		return OrderStatusCreated
 	}
@@ -237,6 +306,8 @@ func NewBroker(addr string, apiKey string, secretKey string) *DiribitBroker {
 	}
 	client := deribit.New(cfg)
 	return &DiribitBroker{
-		client: client,
+		client:           client,
+		orderBookManager: NewOrderBookManager(),
+		emitter:          emission.NewEmitter(),
 	}
 }
